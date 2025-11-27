@@ -1,200 +1,183 @@
-import React from 'react';
-import {
-  heroStats,
-  corePrinciples,
-  flows,
-  sessionLogic,
-  dataModel,
-  apiSurface,
-  aiResponsibilities,
-  uxAnchors
-} from './data';
+import React, { useEffect, useMemo, useState } from 'react';
+import OnboardingScreen from './screens/Onboarding';
+import HomeScreen from './screens/Home';
+import QuizSessionScreen from './screens/QuizSession';
+import SessionSummaryScreen from './screens/SessionSummary';
+import UploadScreen from './screens/Upload';
+import CollectionsScreen from './screens/Collections';
+import { listCollections, startSession, submitAnswer, getSessionResult, uploadQuiz } from './lib/api';
+import { CollectionSummary, QuizCard, Screen, SessionResult, StartSessionResponse } from './types';
 
-const Section: React.FC<{ title: string; kicker?: string; description?: string; children: React.ReactNode }> = ({
-  title,
-  kicker,
-  description,
-  children
-}) => (
-  <section className="section">
-    {kicker && <p className="section__kicker">{kicker}</p>}
-    <div className="section__header">
-      <h2>{title}</h2>
-      {description && <p>{description}</p>}
-    </div>
-    {children}
-  </section>
-);
-
-const FlowCard: React.FC<{
-  title: string;
-  intent: string;
-  steps: { label: string; detail: string }[];
-}> = ({ title, intent, steps }) => (
-  <article className="flow-card">
-    <header>
-      <h3>{title}</h3>
-      <p>{intent}</p>
-    </header>
-    <ol>
-      {steps.map((step) => (
-        <li key={step.label}>
-          <span>{step.label}</span>
-          <p>{step.detail}</p>
-        </li>
-      ))}
-    </ol>
-  </article>
-);
-
-const ListCard: React.FC<{ title: string; items: string[] }> = ({ title, items }) => (
-  <article className="list-card">
-    <h3>{title}</h3>
-    <ul>
-      {items.map((item) => (
-        <li key={item}>{item}</li>
-      ))}
-    </ul>
-  </article>
-);
+const USER_ID = 'demo-user';
 
 function App() {
+  const [screen, setScreen] = useState<Screen>('onboarding');
+  const [collections, setCollections] = useState<CollectionSummary[]>([]);
+  const [activeCollectionId, setActiveCollectionId] = useState('istqb-foundation');
+  const [session, setSession] = useState<StartSessionResponse | null>(null);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [answers, setAnswers] = useState<{ cardId: string; isCorrect: boolean }[]>([]);
+  const [sessionResult, setSessionResult] = useState<SessionResult | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [recentCollection, setRecentCollection] = useState<{ id: string; name: string } | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      const data = await listCollections(USER_ID);
+      setCollections(data);
+      if (data.length > 0) {
+        setActiveCollectionId(data[0].id);
+      }
+    })();
+  }, []);
+
+  const activeCollectionName = useMemo(() => {
+    const active = collections.find((c) => c.id === activeCollectionId);
+    return active?.name ?? 'ISTQB Foundation 4.0';
+  }, [collections, activeCollectionId]);
+
+  const handleStartSession = async (collectionIdOverride?: string) => {
+    const targetCollectionId = collectionIdOverride ?? activeCollectionId;
+    const newSession = await startSession({ userId: USER_ID, collectionId: targetCollectionId });
+    setActiveCollectionId(targetCollectionId);
+    setSession(newSession);
+    setCurrentIndex(0);
+    setAnswers([]);
+    setScreen('quiz');
+    setRecentCollection(null);
+  };
+
+  const handleCardComplete = async (card: QuizCard, isCorrect: boolean) => {
+    if (!session) return;
+    await submitAnswer({ userId: USER_ID, sessionId: session.sessionId, cardId: card.id, isCorrect });
+    const updatedAnswers = [...answers, { cardId: card.id, isCorrect }];
+    setAnswers(updatedAnswers);
+
+    if (currentIndex + 1 < session.cards.length) {
+      setCurrentIndex((prev) => prev + 1);
+    } else {
+      const result = await getSessionResult({
+        userId: USER_ID,
+        sessionId: session.sessionId,
+        answers: updatedAnswers
+      });
+      setSessionResult(result);
+      setScreen('summary');
+    }
+  };
+
+  const handleAbortSession = () => {
+    setSession(null);
+    setCurrentIndex(0);
+    setAnswers([]);
+    setScreen('home');
+  };
+
+  const handleUpload = async ({ fileName, cardCount }: { fileName: string; cardCount: number }) => {
+    setUploading(true);
+    const { collectionId, name } = await uploadQuiz({ userId: USER_ID, fileName, cardCount });
+    setCollections((prev) => [
+      ...prev,
+      {
+        id: collectionId,
+        name,
+        type: 'custom',
+        cardCount,
+        description: 'Generated from upload flow.',
+        createdAt: new Date().toISOString().split('T')[0]
+      }
+    ]);
+    setRecentCollection({ id: collectionId, name });
+    setUploading(false);
+  };
+
+  const handleSelectCollection = (collectionId: string) => {
+    setActiveCollectionId(collectionId);
+    setScreen('home');
+  };
+
+  const handleDeleteCollection = (collectionId: string) => {
+    setCollections((prev) => {
+      const next = prev.filter((collection) => collection.id !== collectionId);
+      if (collectionId === activeCollectionId) {
+        setActiveCollectionId(next[0]?.id ?? 'istqb-foundation');
+      }
+      return next;
+    });
+  };
+
+  const renderScreen = () => {
+    switch (screen) {
+      case 'onboarding':
+        return <OnboardingScreen onContinue={() => setScreen('home')} />;
+      case 'home':
+        return (
+          <HomeScreen
+            onStartSession={handleStartSession}
+            onUpload={() => setScreen('upload')}
+            onCollections={() => setScreen('collections')}
+            suggestedCount={session?.suggestedCount ?? 8}
+            newCards={session?.newCards ?? 2}
+            activeCollectionName={activeCollectionName}
+          />
+        );
+      case 'quiz':
+        return (
+          <QuizSessionScreen
+            card={session ? session.cards[currentIndex] : null}
+            currentIndex={currentIndex}
+            total={session?.cards.length ?? 0}
+            onCardComplete={handleCardComplete}
+            onAbort={handleAbortSession}
+          />
+        );
+      case 'summary':
+        return (
+          <SessionSummaryScreen
+            result={sessionResult}
+            onStartAnother={handleStartSession}
+            onDone={() => setScreen('home')}
+          />
+        );
+      case 'upload':
+        return (
+          <UploadScreen
+            onUpload={handleUpload}
+            isUploading={uploading}
+            recentCollection={recentCollection}
+            onStartRecentCollection={(collectionId) => handleStartSession(collectionId)}
+          />
+        );
+      case 'collections':
+        return (
+          <CollectionsScreen
+            collections={collections}
+            activeCollectionId={activeCollectionId}
+            onSelect={handleSelectCollection}
+            onDelete={handleDeleteCollection}
+          />
+        );
+      default:
+        return null;
+    }
+  };
+
   return (
     <main className="app-shell">
-      <header className="hero">
-        <p className="hero__eyebrow">FSRS-first · AI-assisted · Cloud synced</p>
-        <h1>ISTQB & custom glossary practice that feels effortless.</h1>
-        <p>
-          Launch straight into a single, well-paced study path. FSRS handles spacing, AI expands your decks,
-          and Supabase keeps every card, session, and distractor in sync across devices.
-        </p>
-        <div className="hero__cta">
-          <button>Start today&apos;s session</button>
-          <div>
-            <strong>Upload later</strong>
-            <p>Documents become FSRS-ready cards in under a minute.</p>
-          </div>
-        </div>
-        <div className="hero__stats">
-          {heroStats.map((stat) => (
-            <div key={stat.label}>
-              <p>{stat.label}</p>
-              <h3>{stat.value}</h3>
-              <span>{stat.detail}</span>
-            </div>
-          ))}
-        </div>
-      </header>
-
-      <Section title="Vision & scope" kicker="01" description="Mobile-first experience with one obvious main path and maximal backend intelligence.">
-        <div className="grid two">
-          <div className="vision-card">
-            <h3>What users can do</h3>
-            <ul>
-              <li>Practice the complete ISTQB glossary out of the box.</li>
-              <li>Upload PDF, DOCX, or TXT files and let AI mint fresh decks.</li>
-              <li>Own multiple collections stored in the cloud and switch on demand.</li>
-            </ul>
-          </div>
-          <div className="vision-card">
-            <h3>System rules</h3>
-            <ul>
-              <li>Every card is an FSRS card with state, stability, difficulty, due date.</li>
-              <li>Sessions always prioritize due work, then tightly limited new cards.</li>
-              <li>Local cache (Zustand) mirrors the Supabase source of truth.</li>
-            </ul>
-          </div>
-        </div>
-      </Section>
-
-      <Section title="Core principles" kicker="02">
-        <div className="grid three">
-          {corePrinciples.map((principle) => (
-            <article key={principle.title} className="principle-card">
-              <h3>{principle.title}</h3>
-              <p>{principle.detail}</p>
-            </article>
-          ))}
-        </div>
-      </Section>
-
-      <Section title="Main flows" kicker="03" description="Seven flows capture the entire journey from first run to advanced collection management.">
-        <div className="flow-grid">
-          {flows.map((flow) => (
-            <FlowCard key={flow.id} title={flow.title} intent={flow.intent} steps={flow.steps} />
-          ))}
-        </div>
-      </Section>
-
-      <Section title="Session engine" kicker="04" description="FSRS logic, quotas, and telemetry live exclusively in the backend.">
-        <div className="grid two">
-          <article className="list-card">
-            <h3>Quality scoring rules</h3>
-            <ul>
-              {sessionLogic.qualityRules.map((rule) => (
-                <li key={rule.outcome}>
-                  <strong>{rule.outcome}</strong>
-                  <span> → quality {rule.quality}</span>
-                </li>
-              ))}
-            </ul>
-          </article>
-          <article className="list-card">
-            <h3>Processing pipeline</h3>
-            <ol>
-              {sessionLogic.pipeline.map((step) => (
-                <li key={step}>{step}</li>
-              ))}
-            </ol>
-          </article>
-        </div>
-        <ListCard title="Non‑negotiable guardrails" items={sessionLogic.guardrails} />
-      </Section>
-
-      <Section title="Data model" kicker="05" description="Supabase schema keeps cards, FSRS state, and sessions normalized.">
-        <div className="data-grid">
-          {dataModel.map((entity) => (
-            <article key={entity.entity}>
-              <header>
-                <h3>{entity.entity}</h3>
-                <p>{entity.notes}</p>
-              </header>
-              <p className="fields">Fields: {entity.fields.join(', ')}</p>
-            </article>
-          ))}
-        </div>
-      </Section>
-
-      <Section title="API surface" kicker="06" description="Edge functions drive both study and creation flows.">
-        <div className="api-grid">
-          {apiSurface.map((api) => (
-            <article key={api.path}>
-              <p className="badge">{api.method}</p>
-              <h3>{api.path}</h3>
-              <p>{api.purpose}</p>
-            </article>
-          ))}
-        </div>
-      </Section>
-
-      <Section title="AI responsibilities" kicker="07" description="AI augments content and pacing without touching FSRS formulas or quotas.">
-        <div className="grid three">
-          {aiResponsibilities.map((item) => (
-            <article key={item.title} className="principle-card">
-              <h3>{item.title}</h3>
-              <p>{item.detail}</p>
-            </article>
-          ))}
-        </div>
-      </Section>
-
-      <Section title="UX anchors" kicker="08" description="Simple, ADHD-friendly presentation keeps the focus on one strong main path.">
-        <ul className="ux-list">
-          {uxAnchors.map((anchor) => (
-            <li key={anchor}>{anchor}</li>
-          ))}
-        </ul>
-      </Section>
+      {screen !== 'onboarding' && screen !== 'quiz' && (
+        <nav className="app-nav">
+          <button onClick={() => setScreen('home')} className={screen === 'home' ? 'active' : ''}>
+            Home
+          </button>
+          <button onClick={() => setScreen('upload')} className={screen === 'upload' ? 'active' : ''}>
+            Upload document
+          </button>
+          <button onClick={() => setScreen('collections')} className={screen === 'collections' ? 'active' : ''}>
+            My collections
+          </button>
+        </nav>
+      )}
+      {renderScreen()}
     </main>
   );
 }
